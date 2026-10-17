@@ -38,3 +38,6 @@
 *~
 .DS_Store
 Thumbs.db
+
+# Local service config with secrets
+deploy/*.env

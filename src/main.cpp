@@ -1,94 +1,153 @@
-#include <cstdlib>
-#include "httplib.h"
-#include <nlohmann/json.hpp>
-#include <string>
+// reading_goal：读取 Kavita 每日阅读时长，计算每日目标和连续天数，并提供一个网页
+//
+// 用法：
+//   ./reading_goal          启动网页服务（默认 http://127.0.0.1:5100）
+//   ./reading_goal --once   只在终端打印一次今天的结果，然后退出
+
+#include <chrono>
+#include <cstring>
+#include <ctime>
 #include <iostream>
-#include <optional>
 #include <map>
+#include <mutex>
+#include <optional>
+#include <string>
+
+#include <nlohmann/json.hpp>
+
+#include "config.hpp"
+#include "httplib.h"
+#include "kavita_client.hpp"
+#include "page.hpp"
 #include "streak.hpp"
 
+using json = nlohmann::json;
 
-std::optional<std::string> login(const std::string& apiKey){
-    httplib::Client cli("http://localhost:5000");
-    auto res = cli.Post("/api/plugin/authenticate?apiKey=" + apiKey + "&pluginName=kavitaVersion", "", "application/json");
-    if (!res) {
-        std::cerr << "Request failed: " << res.error() << std::endl;
-        return std::nullopt;
-    }
-    if( res->status == 200) {
-        std::cout << "login successful: "  << std::endl;
-    } else {
-        std::cerr << "Request failed with status: " << (res ? std::to_string(res->status) : "No response") << std::endl;
-        return std::nullopt;
-    }
+namespace {
 
-    using json = nlohmann::json;
+constexpr int kHeatmapDays = 16 * 7;   // 网页热力图显示最近 16 周
 
-    json j = json::parse(res->body);                    // 格式不对会抛出 json::parse_error 异常
-    if (!j.contains("token")) {
-        std::cerr << "Response does not contain 'token' field." << std::endl;
-        return std::nullopt;
-    }
-    std::string token = j.at("token").get<std::string>(); // 字段不存在时 at() 会抛出异常
-    printf("token: %s\n", token.substr(0,20).c_str());
-
-    return token;
+std::string nowHHMM() {
+    std::time_t t = std::time(nullptr);
+    std::tm tm{};
+    localtime_r(&t, &tm);
+    char buf[6];
+    std::strftime(buf, sizeof buf, "%H:%M", &tm);
+    return buf;
 }
 
-std::optional<std::map<std::string, int>> fetchActivity(const std::string& token){
-    httplib::Client cli("http://localhost:5000");
-    std::map<std::string, int> dateToSeconds;
-    httplib::Headers headers = {{"Authorization", "Bearer " + token}};
-    auto res = cli.Get("/api/stats/reading-activity?userId=1&year=2026&TimeZoneId=Asia/Shanghai&Libraries=2", headers);
-    if (!res) {
-        std::cerr << "Request failed: " << res.error() << std::endl;
-        return std::nullopt;
-    }
-    if (res->status != 200) {
-        std::cerr << "Request failed with status: " << res->status << std::endl;
-        return std::nullopt;
-    }
-    using json = nlohmann::json;
-    json j = json::parse(res->body);
-    for (auto& [date, entry] : j.items()) {
-        long long seconds = entry.value("totalTimeReadingSeconds", 0LL);
-        if (seconds > 0) {
-            dateToSeconds[date] = static_cast<int>(seconds );
+// 把原始数据整理成网页需要的 JSON
+json buildStatus(const std::map<std::string, int>& activity, const Config& cfg) {
+    const std::string today = todayString();
+    const auto days = lastNDays(activity, today, kHeatmapDays);
+
+    int weekSeconds = 0;
+    for (const auto& [date, sec] : lastNDays(activity, today, 7)) weekSeconds += sec;
+
+    json daysJson = json::array();
+    for (const auto& [date, sec] : days) daysJson.push_back({{"date", date}, {"seconds", sec}});
+
+    return {
+        {"today", today},
+        {"goalMinutes", cfg.goalMinutes},
+        {"todaySeconds", secondsOn(activity, today)},
+        {"streak", calcStreak(activity, today, cfg.goalMinutes)},
+        {"best", bestStreak(activity, cfg.goalMinutes)},
+        {"weekSeconds", weekSeconds},
+        {"days", daysJson},
+        {"updatedAt", nowHHMM()},
+    };
+}
+
+int currentYear() {
+    return std::stoi(todayString().substr(0, 4));
+}
+
+// 带缓存的数据源：cacheSeconds 内重复请求直接返回上次结果，避免频繁访问 Kavita
+// httplib 的服务器用多线程处理请求，所以用 mutex 保护共享数据
+class StatusCache {
+public:
+    explicit StatusCache(const Config& cfg) : cfg_(cfg), client_(cfg) {}
+
+    // 成功返回 JSON；失败返回 nullopt 并填写 error
+    std::optional<json> get(std::string& error) {
+        std::lock_guard<std::mutex> lock(mu_);
+        const auto now = std::chrono::steady_clock::now();
+        if (cached_ && now - fetchedAt_ < std::chrono::seconds(cfg_.cacheSeconds)) {
+            return buildStatus(*cached_, cfg_);   // 原始数据走缓存，但日期、连续天数每次重新算
         }
+        auto activity = client_.fetchActivity(currentYear(), error);
+        if (!activity) return std::nullopt;
+        cached_ = std::move(*activity);
+        fetchedAt_ = now;
+        return buildStatus(*cached_, cfg_);
     }
-    return dateToSeconds;
+
+private:
+    Config cfg_;
+    KavitaClient client_;
+    std::mutex mu_;
+    std::optional<std::map<std::string, int>> cached_;
+    std::chrono::steady_clock::time_point fetchedAt_{};
 };
 
-int main(){
-const char* key = std::getenv("KAVITA_API_KEY");   // 没设置时返回 nullptr
-if (key == nullptr) {
-    std::cerr << "KAVITA_API_KEY environment variable is not set." << std::endl;
-    return 1;
+int runOnce(const Config& cfg) {
+    KavitaClient client(cfg);
+    std::string error;
+    auto activity = client.fetchActivity(currentYear(), error);
+    if (!activity) {
+        std::cerr << "错误：" << error << "\n";
+        return 1;
+    }
+    const json s = buildStatus(*activity, cfg);
+    const int todaySec = s["todaySeconds"].get<int>();
+    std::cout << "日期：" << s["today"].get<std::string>() << "\n"
+              << "今天：" << todaySec / 60 << " 分钟 / 目标 " << cfg.goalMinutes << " 分钟 "
+              << (todaySec >= cfg.goalMinutes * 60 ? "✅" : "⏳") << "\n"
+              << "连续打卡：" << s["streak"].get<int>() << " 天（最长 " << s["best"].get<int>() << " 天）\n"
+              << "近 7 天：" << s["weekSeconds"].get<int>() / 60 << " 分钟\n";
+    return 0;
 }
-auto token = login(key);
-if (!token) return 1;
-std::cout << "登录成功: " << token->substr(0, 20) << "...\n";
-auto activity = fetchActivity(*token);
-if (!activity) return 1;
-std::cout << "阅读活动数据:\n";
-for (const auto& [date, seconds] : *activity) {
-    std::cout << date << ": " << seconds << " 秒\n";
-}
 
-std::string today = todayString();
-std::cout << "今天是: " << today << std::endl;
+}  // namespace
 
-std::string nextDay = addDays("2026-10-31", 1); // 测试日期加减函数
-std::cout << "明天是: " << nextDay << std::endl;
+int main(int argc, char** argv) {
+    auto cfg = loadConfig();
+    if (!cfg) {
+        std::cerr << "缺少环境变量 KAVITA_API_KEY\n";
+        return 1;
+    }
 
-int goldMinutes = 10; // 设定目标分钟数
-int streak = calcStreak(*activity, today, goldMinutes);
-auto it = activity->find(today);
-int todaySeconds = (it == activity->end()) ? 0 : it->second;
-std::cout << "today: " << todaySeconds / 60 << " 目标分钟数: " << goldMinutes << std::endl;
+    if (argc > 1 && std::strcmp(argv[1], "--once") == 0) return runOnce(*cfg);
 
+    StatusCache cache(*cfg);
+    httplib::Server svr;
 
-std::cout << "当前连续阅读天数: " << streak << std::endl;
+    svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(kIndexHtml, "text/html; charset=utf-8");
+    });
 
+    svr.Get("/api/status", [&cache](const httplib::Request&, httplib::Response& res) {
+        std::string error;
+        auto status = cache.get(error);
+        if (!status) {
+            res.status = 502;   // 502 Bad Gateway：上游（Kavita）出了问题
+            res.set_content(json{{"error", error}}.dump(), "application/json; charset=utf-8");
+            return;
+        }
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(status->dump(), "application/json; charset=utf-8");
+    });
+
+    svr.Get("/healthz", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content("ok", "text/plain");
+    });
+
+    std::cout << "reading_goal 已启动：http://" << cfg->listenHost << ":" << cfg->listenPort
+              << "（目标 " << cfg->goalMinutes << " 分钟/天）" << std::endl;
+    if (!svr.listen(cfg->listenHost, cfg->listenPort)) {
+        std::cerr << "端口 " << cfg->listenPort << " 监听失败（可能已被占用）\n";
+        return 1;
+    }
     return 0;
 }

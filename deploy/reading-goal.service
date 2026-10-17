@@ -1,0 +1,17 @@
+# systemd 服务：开机自动启动 reading_goal，崩溃后自动重启
+# 安装方法见 README.md 的「部署」一节
+[Unit]
+Description=Reading goal tracker for Kavita
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=time
+EnvironmentFile=/home/time/.config/reading-goal.env
+ExecStart=/home/time/dev/reading-goal/build/reading_goal
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
