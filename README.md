@@ -1,1 +1,1 @@
-# addthefunction
+cmake -B build && cmake --build build && ./build/reading_goal
