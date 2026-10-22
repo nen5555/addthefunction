@@ -13,6 +13,11 @@ struct Config {
     std::string listenHost = "127.0.0.1";              // LISTEN_HOST（只监听本机，由 tailscale serve 转发）
     int listenPort = 5100;                             // LISTEN_PORT
     int cacheSeconds = 60;                             // CACHE_SECONDS：多久向 Kavita 重新拉一次数据
+
+    // 网页上传书籍（LIBRARY_DIR 为空时关闭上传功能）
+    std::string libraryDir;                            // LIBRARY_DIR：本机上 Kavita 书库文件夹的路径（宿主机路径，不是容器内路径）
+    int uploadLibraryId = 0;                           // UPLOAD_LIBRARY_ID：上传后扫描哪个书库；0 = 扫描全部书库
+    int uploadMaxMB = 300;                             // UPLOAD_MAX_MB：单次上传大小上限
 };
 
 namespace detail {
@@ -39,5 +44,8 @@ inline std::optional<Config> loadConfig() {
     c.listenHost   = detail::envOr("LISTEN_HOST", c.listenHost);
     c.listenPort   = detail::envIntOr("LISTEN_PORT", c.listenPort);
     c.cacheSeconds = detail::envIntOr("CACHE_SECONDS", c.cacheSeconds);
+    c.libraryDir      = detail::envOr("LIBRARY_DIR", c.libraryDir);
+    c.uploadLibraryId = detail::envIntOr("UPLOAD_LIBRARY_ID", c.uploadLibraryId);
+    c.uploadMaxMB     = detail::envIntOr("UPLOAD_MAX_MB", c.uploadMaxMB);
     return c;
 }

@@ -26,6 +26,11 @@ public:
     // 失败时返回 nullopt，并把原因写进 error
     std::optional<std::map<std::string, int>> fetchActivity(int currentYear, std::string& error);
 
+    // 让 Kavita 重新扫描书库，新上传的书才会出现
+    // libraryId > 0 只扫描这个书库；0 扫描当前用户的全部书库
+    // 需要管理员（admin）账号的 API Key
+    bool scanLibraries(int libraryId, std::string& error);
+
 private:
     Config cfg_;
     std::string lastError_;

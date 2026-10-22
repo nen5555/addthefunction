@@ -123,3 +123,32 @@ std::optional<std::map<std::string, int>> KavitaClient::fetchActivity(int curren
     thisYear->insert(lastYear->begin(), lastYear->end());   // 合并两年，日期键不会重复
     return thisYear;
 }
+
+bool KavitaClient::scanLibraries(int libraryId, std::string& error) {
+    auto token = login();
+    if (!token) { error = lastError_; return false; }
+
+    std::vector<int> ids;
+    if (libraryId > 0) {
+        ids.push_back(libraryId);
+    } else {
+        auto libs = fetchLibraryIds(*token);
+        if (!libs) { error = lastError_; return false; }
+        ids = std::move(*libs);
+    }
+
+    httplib::Client cli(cfg_.kavitaUrl);
+    cli.set_connection_timeout(5);
+    for (int id : ids) {
+        // 扫描在 Kavita 后台异步进行，这个请求会立即返回
+        auto res = cli.Post("/api/Library/scan?libraryId=" + std::to_string(id), authHeaders(*token),
+                            "", "application/json");
+        if (!res) { error = "无法连接 Kavita"; return false; }
+        if (res->status != 200) {
+            error = "书库 " + std::to_string(id) + " 扫描请求失败，HTTP " + std::to_string(res->status) +
+                    (res->status == 401 || res->status == 403 ? "（需要管理员账号的 API Key）" : "");
+            return false;
+        }
+    }
+    return true;
+}

@@ -10,13 +10,17 @@ add_library(core src/streak.cpp)                 # 纯逻辑（日期、连续�
 target_include_directories(core PUBLIC src)
 target_compile_options(core PRIVATE -Wall -Wextra)
 
+add_library(upload src/upload.cpp)               # 上传：文件名检查、保存文件
+target_include_directories(upload PUBLIC src)
+target_compile_options(upload PRIVATE -Wall -Wextra)
+
 add_library(kavita src/kavita_client.cpp)        # 和 Kavita API 通信
 target_include_directories(kavita PUBLIC src third_party)
 target_link_libraries(kavita PUBLIC Threads::Threads nlohmann_json::nlohmann_json)
 target_compile_options(kavita PRIVATE -Wall -Wextra)
 
 add_executable(reading_goal src/main.cpp)
-target_link_libraries(reading_goal PRIVATE core kavita)
+target_link_libraries(reading_goal PRIVATE core kavita upload)
 target_compile_options(reading_goal PRIVATE -Wall -Wextra)
 
 include(CTest)
@@ -25,4 +29,8 @@ if(BUILD_TESTING)
     target_include_directories(streak_tests PRIVATE src)
     target_link_libraries(streak_tests PRIVATE core)
     add_test(NAME streak_tests COMMAND streak_tests)
+
+    add_executable(upload_tests tests/upload_tests.cpp)
+    target_link_libraries(upload_tests PRIVATE upload)
+    add_test(NAME upload_tests COMMAND upload_tests)
 endif()

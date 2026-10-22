@@ -1,6 +1,6 @@
 #pragma once
 
-// 网页前端：一个自包含的 HTML 页面，数据从 /api/status 获取
+// 网页前端：一个自包含的 HTML 页面，数据从 /api/status 获取，书籍通过 /api/upload 上传
 // R"HTML( ... )HTML" 是 C++ 原始字符串字面量（raw string literal），里面的引号、换行都不用转义
 inline const char* kIndexHtml = R"HTML(<!doctype html>
 <html lang="zh-CN">
@@ -59,6 +59,20 @@ inline const char* kIndexHtml = R"HTML(<!doctype html>
   .legend { display: flex; gap: 4px; align-items: center; justify-content: flex-end; margin-top: 10px; color: var(--muted); font-size: 11px; }
   .legend .cell { width: 11px; }
   .foot { color: var(--muted); font-size: 12px; text-align: center; }
+  .upload { display: none; }
+  .upload b { font-size: 14px; }
+  .pick {
+    display: block; margin-top: 12px; padding: 18px; border: 2px dashed var(--track); border-radius: 14px;
+    text-align: center; color: var(--muted); cursor: pointer;
+  }
+  .pick.drag { border-color: var(--accent); color: var(--accent); }
+  .pick input { display: none; }
+  .progress { height: 6px; border-radius: 3px; background: var(--track); margin-top: 12px; overflow: hidden; display: none; }
+  .progress div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .results { list-style: none; padding: 0; margin: 10px 0 0; font-size: 13px; }
+  .results li { padding: 4px 0; word-break: break-all; }
+  .results .bad { color: var(--warn); }
+  .scan { color: var(--muted); font-size: 12px; margin-top: 6px; }
   .error { background: var(--card); border-left: 4px solid var(--warn); border-radius: 12px; padding: 12px 14px; display: none; }
 </style>
 </head>
@@ -97,6 +111,17 @@ inline const char* kIndexHtml = R"HTML(<!doctype html>
     <div class="legend">少
       <div class="cell"></div><div class="cell l1"></div><div class="cell l2"></div>
       <div class="cell l3"></div><div class="cell l4"></div>多</div>
+  </section>
+
+  <section class="card upload" id="upload">
+    <b>添加书籍</b>
+    <label class="pick" id="pick">
+      <input type="file" id="file" multiple accept=".epub,.pdf,.cbz,.cbr,.cb7,.cbt,.zip,.rar,.7z">
+      <span id="pickText">点这里选择文件（epub / pdf / 漫画压缩包）</span>
+    </label>
+    <div class="progress" id="progress"><div id="progressBar"></div></div>
+    <ul class="results" id="results"></ul>
+    <div class="scan" id="scan"></div>
   </section>
 
   <p class="foot" id="foot">数据来自 Kavita，读完后约 10–15 分钟才会计入</p>
@@ -155,6 +180,73 @@ function render(d) {
     '更新于 ' + d.updatedAt + ' · 读完后约 10–15 分钟才会计入';
 }
 
+// ---------- 上传 ----------
+let maxBytes = 300 * 1024 * 1024;
+let uploading = false;
+
+function showResults(items, scanMsg) {
+  const ul = document.getElementById('results');
+  ul.innerHTML = '';
+  for (const it of items) {
+    const li = document.createElement('li');
+    li.className = it.ok ? '' : 'bad';
+    li.textContent = (it.ok ? '✅ ' : '⚠️ ') + it.name + ' — ' + it.message;
+    ul.appendChild(li);
+  }
+  document.getElementById('scan').textContent = scanMsg || '';
+}
+
+function upload(files) {
+  if (uploading || !files.length) return;
+  const form = new FormData();
+  let total = 0;
+  for (const f of files) { form.append('file', f, f.name); total += f.size; }
+  if (total > maxBytes) {
+    showResults([], '文件太大：上限 ' + Math.round(maxBytes / 1048576) + ' MB');
+    return;
+  }
+
+  uploading = true;
+  const prog = document.getElementById('progress');
+  const barEl = document.getElementById('progressBar');
+  const text = document.getElementById('pickText');
+  prog.style.display = 'block';
+  barEl.style.width = '0';
+  showResults([], '');
+
+  // fetch() 拿不到上传进度，所以这里用 XMLHttpRequest
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', 'api/upload');
+  xhr.upload.onprogress = e => {
+    if (!e.lengthComputable) return;
+    const pct = Math.round(e.loaded / e.total * 100);
+    barEl.style.width = pct + '%';
+    text.textContent = pct < 100 ? '上传中 ' + pct + '%' : '保存中…';
+  };
+  xhr.onload = () => {
+    let d = {};
+    try { d = JSON.parse(xhr.responseText); } catch (_) {}
+    if (xhr.status === 200) showResults(d.results || [], d.scan);
+    else showResults([], '上传失败：' + (d.error || ('HTTP ' + xhr.status)));
+    done();
+  };
+  xhr.onerror = () => { showResults([], '上传失败：网络错误'); done(); };
+  function done() {
+    uploading = false;
+    prog.style.display = 'none';
+    text.textContent = '点这里选择文件（epub / pdf / 漫画压缩包）';
+    document.getElementById('file').value = '';
+  }
+  xhr.send(form);
+}
+
+document.getElementById('file').addEventListener('change', e => upload(e.target.files));
+const pick = document.getElementById('pick');
+['dragenter', 'dragover'].forEach(t => pick.addEventListener(t, e => { e.preventDefault(); pick.classList.add('drag'); }));
+['dragleave', 'drop'].forEach(t => pick.addEventListener(t, e => { e.preventDefault(); pick.classList.remove('drag'); }));
+pick.addEventListener('drop', e => upload(e.dataTransfer.files));
+
+// ---------- 数据 ----------
 async function load() {
   const err = document.getElementById('error');
   try {
@@ -163,6 +255,8 @@ async function load() {
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
     err.style.display = 'none';
     render(d);
+    document.getElementById('upload').style.display = d.uploadEnabled ? 'block' : 'none';
+    if (d.uploadMaxMB) maxBytes = d.uploadMaxMB * 1024 * 1024;
   } catch (e) {
     err.textContent = '获取数据失败：' + e.message;
     err.style.display = 'block';
